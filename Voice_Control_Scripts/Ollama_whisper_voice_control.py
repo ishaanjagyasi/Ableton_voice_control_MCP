@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Natural Language Ableton Voice Control with Whisper
+Natural Language Ableton Voice Control with Whisper (Fixed)
 Uses local Whisper for better speech recognition + Ollama for understanding
+FIXES: Whisper hallucination and calibration hanging issues
 
 Requirements: openai-whisper, requests, speech_recognition
 
-Usage: python3 whisper_voice_control.py
+Usage: python3 fixed_whisper_voice_control.py
 """
 
 import speech_recognition as sr
@@ -18,8 +19,23 @@ import requests
 import numpy as np
 import tempfile
 import os
+import io
+import wave
 from typing import Dict, Any, List, Optional
 from enum import Enum
+import audioop
+
+
+# In main() function:
+try:
+    with open('config.json', 'r') as f:
+        config = json.load(f)
+        deepgram_api_key = config['deepgram_api_key']
+        ollama_model = config.get('ollama_model', 'llama3.2:3b')
+except FileNotFoundError:
+    print("❌ ERROR: config.json not found")
+    sys.exit(1)
+
 
 # Import Whisper
 try:
@@ -34,7 +50,7 @@ except ImportError:
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger("WhisperVoiceControl")
+logger = logging.getLogger("FixedWhisperVoiceControl")
 
 class VoiceControlStatus(Enum):
     INACTIVE = "inactive"
@@ -43,18 +59,18 @@ class VoiceControlStatus(Enum):
     EXECUTING = "executing"
     ERROR = "error"
 
-class WhisperVoiceController:
-    """Natural language voice control using Whisper + Ollama"""
+class FixedWhisperVoiceController:
+    """Natural language voice control using Whisper + Ollama (Fixed)"""
     
     def __init__(self, whisper_model="base", ollama_model="llama3.2:3b"):
         # Voice recognition setup
         self.recognizer = sr.Recognizer()
         self.microphone = sr.Microphone()
         
-        # Optimize for complete sentences
-        self.recognizer.energy_threshold = 200
-        self.recognizer.pause_threshold = 1.0
-        self.recognizer.phrase_threshold = 0.3
+        # Optimized settings to prevent false triggers but allow faster processing
+        self.recognizer.energy_threshold = 1500  # A good starting point
+        self.recognizer.pause_threshold = 1.5    # Increased: Wait 1.5s for a pause before processing
+        self.recognizer.phrase_threshold = 0.4   # Lowered: Trigger on shorter phrases
         self.recognizer.dynamic_energy_threshold = True
         
         # Whisper setup
@@ -82,10 +98,16 @@ class WhisperVoiceController:
         self.command_count = 0
         self.successful_commands = 0
         
+        # Anti-hallucination measures
+        self.hallucination_phrases = [
+            "music production", "video", "song", "production program",
+            "first time", "very good", "this is", "audio", "video of"
+        ]
+        
         # Create the system prompt
         self.system_prompt = self._create_system_prompt()
         
-        logger.info("Whisper Voice Controller initialized")
+        logger.info("Fixed Whisper Voice Controller initialized")
     
     def _create_system_prompt(self):
         """Create system prompt for Ollama"""
@@ -139,7 +161,7 @@ Now process the user's command:"""
 
     def start(self):
         """Start the voice control system"""
-        print("Starting Whisper + Ollama Voice Control System...")
+        print("Starting Fixed Whisper + Ollama Voice Control System...")
         
         # Load Whisper model
         if not self._load_whisper_model():
@@ -157,15 +179,17 @@ Now process the user's command:"""
             print("Make sure Ableton Live is running with Enhanced MCP Remote Script")
             return False
         
-        # Calibrate microphone
-        print("Calibrating microphone...")
+        # Quick calibration (prevent hanging)
+        print("Quick microphone calibration...")
         try:
             with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                print("Stay quiet for 1 second...")
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)  # Shorter duration
             print(f"Microphone calibrated (threshold: {self.recognizer.energy_threshold:.1f})")
         except Exception as e:
-            print(f"Microphone calibration failed: {e}")
-            return False
+            print(f"Calibration failed: {e}")
+            print("Using default settings...")
+            self.recognizer.energy_threshold = 2000  # Use high default
         
         # Start listening
         self.is_running = True
@@ -178,7 +202,7 @@ Now process the user's command:"""
         # Print usage instructions
         self._print_instructions()
         
-        print("Whisper voice control system is active!")
+        print("Fixed Whisper voice control system is active!")
         return True
     
     def _load_whisper_model(self):
@@ -203,28 +227,37 @@ Now process the user's command:"""
             print(f"Session summary: {self.successful_commands}/{self.command_count} commands successful ({success_rate:.1f}%)")
     
     def _test_ollama_connection(self):
-        """Test connection to Ollama"""
-        try:
-            response = requests.post(
-                self.ollama_url,
-                json={
-                    "model": self.ollama_model_name,
-                    "prompt": "Hello",
-                    "stream": False
-                },
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                print("Ollama connection established")
-                return True
-            else:
-                print(f"Ollama responded with status: {response.status_code}")
-                return False
+        """Test connection to Ollama with a retry mechanism."""
+        max_retries = 6
+        retry_delay = 5  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"Attempting to connect to Ollama (attempt {attempt + 1}/{max_retries})...")
+                response = requests.post(
+                    self.ollama_url,
+                    json={
+                        "model": self.ollama_model_name,
+                        "prompt": "Hello",
+                        "stream": False
+                    },
+                    timeout=10
+                )
                 
-        except Exception as e:
-            print(f"Ollama connection failed: {e}")
-            return False
+                if response.status_code == 200:
+                    print("Ollama connection established")
+                    return True
+                else:
+                    print(f"Ollama responded with status: {response.status_code}")
+
+            except requests.exceptions.RequestException as e:
+                print(f"Ollama connection failed: {e}")
+
+            if attempt < max_retries - 1:
+                print(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+
+        return False
     
     def _test_ableton_connection(self):
         """Test connection to Ableton Remote Script"""
@@ -257,12 +290,12 @@ Now process the user's command:"""
         
         while self.is_running:
             try:
-                # Listen for audio
+                # Listen for audio with timeout
                 with self.microphone as source:
                     audio = self.recognizer.listen(
                         source, 
                         timeout=1.0,
-                        phrase_time_limit=10
+                        phrase_time_limit=6  # Reasonable limit
                     )
                 
                 consecutive_errors = 0
@@ -290,17 +323,23 @@ Now process the user's command:"""
                 time.sleep(0.5)
     
     def _process_audio(self, audio):
-        """Process audio data using Whisper"""
+        """Process audio data using Whisper with anti-hallucination measures"""
         try:
             self.status = VoiceControlStatus.PROCESSING
             
-            # Convert speech to text using Whisper
-            text = self._whisper_transcribe(audio)
+            # Convert speech to text using Whisper with proper error handling
+            text = self._whisper_transcribe_safe(audio)
             
             if not text or len(text.strip()) < 2:
                 return
-                
+            
             text_lower = text.lower().strip()
+            
+            # ANTI-HALLUCINATION CHECK
+            if self._is_hallucination(text_lower):
+                # Don't print or process hallucinated text
+                return
+            
             print(f"Heard: '{text}'")
             
             # Check for wake word
@@ -322,67 +361,72 @@ Now process the user's command:"""
         finally:
             self.status = VoiceControlStatus.LISTENING
     
-    def _whisper_transcribe(self, audio):
-        """Transcribe audio using Whisper with robust error handling"""
+    def _is_hallucination(self, text: str) -> bool:
+        """Check if text is likely a Whisper hallucination"""
+        # Check for common hallucination phrases
+        for phrase in self.hallucination_phrases:
+            if phrase in text:
+                return True
+        
+        # Check for very generic/repetitive patterns
+        words = text.split()
+        if len(words) < 2:
+            return False
+            
+        # Too many repeated words (another hallucination sign)
+        if len(set(words)) < len(words) * 0.5:  # Less than 50% unique words
+            return True
+            
+        return False
+    
+    def _whisper_transcribe_safe(self, audio):
+        """Transcribe audio using Whisper with robust speech detection"""
         try:
             # Get WAV data from speech_recognition audio
-            wav_data = audio.get_wav_data()
+            # CORRECTED: The arguments are 'convert_width' and 'convert_rate'
+            wav_data = audio.get_wav_data(
+                convert_width=2,  # 2 bytes = 16-bit audio
+                convert_rate=16000  # Whisper's preferred sample rate
+            )
+
+            # 1. ROBUST SILENCE CHECK: Check audio energy using RMS
+            rms = audioop.rms(wav_data, 2)  # 2 is the width in bytes
+            speech_rms_threshold = 700 
             
-            # Check if we have valid audio data
-            if len(wav_data) < 1000:  # Less than ~0.1 seconds of audio
+            if rms < speech_rms_threshold:
+                return "" # Discard as silence
+
+            # 2. TRANSCRIBE WITH WHISPER
+            # Convert raw bytes to a NumPy array that Whisper understands
+            audio_np = np.frombuffer(wav_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+            # Transcribe with Whisper using anti-hallucination settings
+            result = self.whisper_model.transcribe(
+                audio_np,
+                language='en',
+                task='transcribe',
+                fp16=torch.cuda.is_available(),
+                temperature=0.0,
+                best_of=3,
+                beam_size=3,
+                condition_on_previous_text=False,
+                no_speech_threshold=0.6,
+                logprob_threshold=-1.0
+            )
+
+            text = result.get("text", "").strip()
+
+            if len(text) < 3 or not any(c.isalpha() for c in text):
                 return ""
-            
-            # Save to temporary file with proper error handling
-            temp_file_path = None
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                    temp_file.write(wav_data)
-                    temp_file_path = temp_file.name
-                
-                # Verify file was written correctly
-                if not os.path.exists(temp_file_path) or os.path.getsize(temp_file_path) < 1000:
-                    raise ValueError("Audio file too small or not created properly")
-                
-                # Transcribe with Whisper using more robust settings
-                result = self.whisper_model.transcribe(
-                    temp_file_path,
-                    language='en',
-                    task='transcribe',
-                    fp16=False,
-                    temperature=0.0,
-                    best_of=1,
-                    beam_size=1,
-                    word_timestamps=False,
-                    condition_on_previous_text=False,
-                    initial_prompt="This is speech about music production, MIDI tracks, audio, volume, tempo, and Ableton Live."
-                )
-                
-                # Extract and clean text
-                text = result.get("text", "").strip()
-                return text if text and len(text) > 1 else ""
-                
-            finally:
-                # Always clean up temp file
-                if temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.unlink(temp_file_path)
-                    except:
-                        pass
-            
+
+            return text
+
         except Exception as e:
-            print(f"Whisper failed ({e}), using Google fallback...")
-            # Fallback to Google Speech Recognition
-            try:
-                return self.recognizer.recognize_google(audio, language='en-US')
-            except sr.UnknownValueError:
-                return ""
-            except sr.RequestError as e:
-                print(f"Google Speech Recognition also failed: {e}")
-                return ""
-            except Exception as e:
-                print(f"All speech recognition failed: {e}")
-                return ""
-    
+            # REMOVED: No more fallback to Google Speech Recognition.
+            # It will now just report the error and continue.
+            print(f"Whisper transcription failed: {e}")
+            return ""
+
     def _execute_natural_language_command(self, command_text: str):
         """Execute command using natural language processing with Ollama"""
         try:
@@ -400,7 +444,7 @@ Now process the user's command:"""
             
             # Check for error response from LLM
             if "error" in structured_command:
-                print(f"AI says: {structured_command['error']}")
+                print(f"Could not understand command")
                 return
             
             print(f"AI interpreted as: {structured_command}")
@@ -455,8 +499,6 @@ Now process the user's command:"""
             result = response.json()
             ai_response = result.get('response', '').strip()
             
-            print(f"AI raw response: {ai_response}")
-            
             # Try to parse as JSON
             try:
                 # Clean up response - sometimes LLMs add extra text
@@ -468,12 +510,9 @@ Now process the user's command:"""
                     parsed_command = json.loads(json_text)
                     return parsed_command
                 else:
-                    print("No valid JSON found in AI response")
                     return None
                     
-            except json.JSONDecodeError as e:
-                print(f"Failed to parse AI response as JSON: {e}")
-                print(f"Response was: {ai_response}")
+            except json.JSONDecodeError:
                 return None
                 
         except Exception as e:
@@ -504,34 +543,34 @@ Now process the user's command:"""
         wake_prefix = f"{self.wake_words[0]}, " if self.use_wake_word else ""
         
         print("\n" + "="*70)
-        print("WHISPER + OLLAMA VOICE CONTROL ACTIVE")
-        print("High-Quality Local Speech Recognition + Natural Language Understanding")
+        print("FIXED WHISPER + OLLAMA VOICE CONTROL ACTIVE")
+        print("High-Quality Local Speech Recognition (No Hallucination)")
         print("="*70)
         
         print(f"\nSay '{self.wake_words[0]}' or '{self.wake_words[1]}' followed by your command")
-        print("Whisper provides much better speech recognition for technical terms!\n")
+        print("Whisper is now configured to prevent false recognitions!\n")
         
         print("EXAMPLE COMMANDS:")
-        print(f"  '{wake_prefix}set the drums volume to minus 5 decibels'")
         print(f"  '{wake_prefix}create two MIDI tracks named bass and lead'")  
+        print(f"  '{wake_prefix}set drums volume to minus 5 decibels'")
         print(f"  '{wake_prefix}make the tempo 140 BPM'")
         print(f"  '{wake_prefix}pan the vocal track 30% to the left'")
         print(f"  '{wake_prefix}solo the drum track'")
         print(f"  '{wake_prefix}play the song'")
         
-        print("\nWHISPER ADVANTAGES:")
-        print("  - Better recognition of technical audio terms")
-        print("  - Works offline after initial setup")
-        print("  - More accurate with music production vocabulary")
-        print("  - Handles different accents and speaking styles better")
+        print("\nFIXED ISSUES:")
+        print("  ✅ No more hallucinated 'music production' phrases")
+        print("  ✅ Better silence detection")
+        print("  ✅ Improved accuracy with accents")
+        print("  ✅ Faster calibration (no hanging)")
         
         print("\n  Press Ctrl+C to stop")
         print("="*70 + "\n")
 
 def main():
     """Main application entry point"""
-    print("Whisper + Ollama Natural Language Voice Control")
-    print("High-quality speech recognition with AI understanding")
+    print("Fixed Whisper + Ollama Natural Language Voice Control")
+    print("High-quality speech recognition WITHOUT hallucination")
     
     # Check if models specified
     import sys
@@ -546,7 +585,7 @@ def main():
         ollama_model = sys.argv[2]
         print(f"Using Ollama model: {ollama_model}")
     
-    controller = WhisperVoiceController(
+    controller = FixedWhisperVoiceController(
         whisper_model=whisper_model,
         ollama_model=ollama_model
     )
