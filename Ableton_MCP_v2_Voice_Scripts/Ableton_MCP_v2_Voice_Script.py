@@ -81,6 +81,10 @@ class UpdatedDeepgramAbletonController:
         self.last_state_update = 0
         self.state_update_interval = 5.0
         
+        # NEW: Command queue for scheduled execution
+        self.command_queue = []
+        self.queue_processing = False
+        
         # Enhanced system prompt with comprehensive parameter support
         self.base_system_prompt = self._create_comprehensive_system_prompt()
         
@@ -100,29 +104,37 @@ COMMANDS:
 2. TRACK MANAGEMENT:
    {"action": "rename_track", "track": "old_track_name", "new_name": "new_track_name"}
    {"action": "delete_track", "track": "track_name"}
-   {"action": "delete_tracks", "tracks": ["track1", "track2"]}  # For multiple deletions
    {"action": "duplicate_track", "track": "track_name", "new_name": "optional_new_name"}
    {"action": "group_tracks", "tracks": ["track1", "track2"], "group_name": "Group Name"}
-   {"action": "batch_commands", "commands": [{"action": "...", ...}, {"action": "...", ...}]}  # For complex multi-step operations
+   
+3. MULTI-TRACK ACTIONS (UNIVERSAL):
+   When a command applies to MULTIPLE tracks, use this format:
+   {"action": "multi_track_action", "tracks": ["track1", "track2"], "base_action": {single_track_action}}
+   
+   Examples:
+   - Mute multiple: {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_mute", "value": true}}
+   - Solo multiple: {"action": "multi_track_action", "tracks": ["vocals"], "base_action": {"action": "set_parameter", "parameter": "mixer_solo", "value": true}}
+   - Delete multiple: {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "delete_track"}}
+   - Add effect to multiple: {"action": "multi_track_action", "tracks": ["vocals", "harmony"], "base_action": {"action": "add_audio_effect", "effect": "reverb"}}
 
-3. ADD EFFECTS:
+4. ADD EFFECTS:
    {"action": "add_audio_effect", "track": "track_name", "effect": "effect_name"}
    Available effects: reverb, delay, echo, compressor, limiter, gate, eq, equalizer, saturator, overdrive, filter, drum bus, glue compressor, multiband dynamics, chorus, flanger, phaser
 
-3. TRANSPORT CONTROLS:
+5. TRANSPORT CONTROLS:
    {"action": "transport_play"} / {"action": "transport_stop"} / {"action": "transport_record"}
    {"action": "set_tempo", "tempo": BPM_NUMBER}
    {"action": "set_time_signature", "numerator": 4, "denominator": 4}
    {"action": "set_loop", "enabled": true/false}
    {"action": "toggle_metronome", "enabled": true/false}
 
-4. MASTER/GLOBAL CONTROLS:
+6. MASTER/GLOBAL CONTROLS:
    {"action": "set_master_volume", "value": VOLUME_LEVEL}
    {"action": "set_cue_volume", "value": VOLUME_LEVEL}
    {"action": "set_crossfader", "value": POSITION}
    {"action": "set_groove_amount", "value": AMOUNT}
 
-5. MIXER CONTROLS:
+7. MIXER CONTROLS:
    {"action": "set_parameter", "parameter": "mixer_solo", "target": "track_name", "value": true}
    {"action": "set_parameter", "parameter": "mixer_mute", "target": "track_name", "value": true}
    {"action": "set_parameter", "parameter": "mixer_volume", "target": "track_name", "value": -5}
@@ -130,24 +142,54 @@ COMMANDS:
    {"action": "set_parameter", "parameter": "mixer_arm", "target": "track_name", "value": true}
    {"action": "set_parameter", "parameter": "mixer_send_a", "target": "track_name", "value": 50}
 
-6. TRACK CONTROLS:
+8. TRACK CONTROLS:
    {"action": "arm_track", "track": "track_name"}
    {"action": "disarm_track", "track": "track_name"}
    {"action": "set_track_monitor", "track": "track_name", "mode": "auto"}
 
-7. CLIP CONTROLS:
+9. CLIP CONTROLS:
    {"action": "launch_clip", "track": "track_name", "clip": 0}
    {"action": "stop_clip", "track": "track_name"}
    {"action": "launch_scene", "scene": 0}
    {"action": "stop_all_clips"}
 
 COMMAND PARSING RULES:
+- **CRITICAL: The word "and" between track names means MULTIPLE TRACKS - ALWAYS use multi_track_action!**
+- **CRITICAL: "drum and bass" = TWO separate tracks: ["drum", "bass"]**
+- **CRITICAL: "drums and bass" = TWO separate tracks: ["drums", "bass"]**
+- **CRITICAL: "vocals and harmony" = TWO separate tracks: ["vocals", "harmony"]**
 - "create a new track" -> {"action": "create_tracks", "track_type": "audio", "count": 1}
+
+MULTI-TRACK EXAMPLES (when you see "and" or "," between track names):
+- "delete drum and bass" -> {"action": "multi_track_action", "tracks": ["drum", "bass"], "base_action": {"action": "delete_track"}}
+- "delete the drum and bass tracks" -> {"action": "multi_track_action", "tracks": ["drum", "bass"], "base_action": {"action": "delete_track"}}
+- "remove drum and bass" -> {"action": "multi_track_action", "tracks": ["drum", "bass"], "base_action": {"action": "delete_track"}}
+- "solo drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_solo", "value": true}}
+- "mute drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_mute", "value": true}}
+- "increase send A on drums and bass by 50 percent" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_send_a", "value": 50}}
+- "add reverb to vocals and harmony" -> {"action": "multi_track_action", "tracks": ["vocals", "harmony"], "base_action": {"action": "add_audio_effect", "effect": "reverb"}}
+- "arm drums and bass for recording" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "arm_track"}}
+
+SINGLE-TRACK EXAMPLES (NO "and" or "," between names):
+- "solo drum track" -> {"action": "set_parameter", "parameter": "mixer_solo", "target": "drum", "value": true}
+- "unsolo drum track" -> {"action": "set_parameter", "parameter": "mixer_solo", "target": "drum", "value": false}
+- "turn solo off on drums" -> {"action": "set_parameter", "parameter": "mixer_solo", "target": "drums", "value": false}
+- "mute bass" -> {"action": "set_parameter", "parameter": "mixer_mute", "target": "bass", "value": true}
+- "unmute bass" -> {"action": "set_parameter", "parameter": "mixer_mute", "target": "bass", "value": false}
+- "mute off on bass" -> {"action": "set_parameter", "parameter": "mixer_mute", "target": "bass", "value": false}
+- "delete drum track" -> {"action": "delete_track", "track": "drum"}
+- "solo the drums" -> {"action": "set_parameter", "parameter": "mixer_solo", "target": "drums", "value": true}
+
+MULTI-TRACK EXAMPLES (when you see "and" or "," between track names):
+- "unsolo drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_solo", "value": false}}
+- "turn solo off on drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_solo", "value": false}}
+- "unmute drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_mute", "value": false}}
+- "mute off on drums and bass" -> {"action": "multi_track_action", "tracks": ["drums", "bass"], "base_action": {"action": "set_parameter", "parameter": "mixer_mute", "value": false}}
+
+OTHER EXAMPLES:
 - "add audio track" -> {"action": "create_tracks", "track_type": "audio", "count": 1}
 - "make midi track" -> {"action": "create_tracks", "track_type": "midi", "count": 1}
 - "new track called vocals" -> {"action": "create_tracks", "track_type": "audio", "count": 1, "names": ["vocals"]}
-- "delete the drum and bass tracks" -> {"action": "delete_tracks", "tracks": ["drum", "bass"]}
-- "remove drums and bass" -> {"action": "delete_tracks", "tracks": ["drums", "bass"]}
 - "create three audio tracks and name them vocals, harmony, and lead" -> {"action": "batch_commands", "commands": [{"action": "create_tracks", "track_type": "audio", "count": 3, "names": ["vocals", "harmony", "lead"]}]}
 - "duplicate bass, add reverb to it, and rename it to bass reverb" -> {"action": "batch_commands", "commands": [{"action": "duplicate_track", "track": "bass", "new_name": "bass reverb"}, {"action": "add_audio_effect", "track": "bass reverb", "effect": "reverb"}]}
 - "rename drums to percussion" -> {"action": "rename_track", "track": "drums", "new_name": "percussion"}
@@ -175,13 +217,6 @@ COMMAND PARSING RULES:
 - "play" -> {"action": "transport_play"}
 - "stop" -> {"action": "transport_stop"}
 
-MULTI-COMMAND PLANNING RULES:
-- For commands affecting multiple items, analyze and create appropriate batch operations
-- "delete drums and bass" -> {"action": "delete_tracks", "tracks": ["drums", "bass"]}
-- For complex sequences, use batch_commands with ordered command list
-- Always break down high-level requests into executable steps
-- Consider dependencies between commands (create before rename, duplicate before modify)
-
 VOLUME PARSING RULES:
 - For exact dB values: use the exact number (e.g., -23 for "-23 dB")
 - For percentage values: use "XX%" format (e.g., "50%" for 50 percent)
@@ -202,6 +237,7 @@ RULES:
 - For tempo commands, use "set_tempo" action with "tempo" parameter
 - For master volume, use "set_master_volume" action with "value" parameter
 - For track arming, use "arm_track" or "disarm_track" actions
+- For MULTIPLE tracks, ALWAYS use "multi_track_action" format
 - RESPOND WITH ONLY JSON, NO OTHER TEXT
 
 Current session tracks:"""
@@ -424,9 +460,64 @@ Current session tracks:"""
         try:
             self.status = VoiceControlStatus.EXECUTING
             self.command_count += 1
-            self._last_command_text = command_text  # Store for validation
             print(f"Processing with Updated AI: '{command_text}'")
             
+            # NEW: Check for multiple tracks FIRST, before AI
+            tracks_to_process = self._extract_tracks_from_command(command_text)
+            
+            if len(tracks_to_process) > 1:
+                print(f"   Detected {len(tracks_to_process)} tracks: {tracks_to_process}")
+                print(f"   Scheduling sequential execution...")
+                
+                # Get AI interpretation for the ACTION only (ignore its track parsing)
+                context_prompt = self._create_context_prompt(command_text)
+                structured_command = self._get_ollama_interpretation(context_prompt)
+                
+                if not structured_command or "error" in structured_command:
+                    print(f"Could not understand command")
+                    return
+                
+                # Extract the base action - handle if AI returned multi_track_action
+                if structured_command.get("action") == "multi_track_action":
+                    base_action_dict = structured_command.get("base_action", {})
+                    
+                    # Queue up commands for each track using base_action details
+                    for track_name in tracks_to_process:
+                        queued_command = base_action_dict.copy()
+                        
+                        # Set track or target based on action type
+                        if base_action_dict.get("action") == "set_parameter":
+                            queued_command["target"] = track_name
+                        else:
+                            queued_command["track"] = track_name
+                        
+                        self.command_queue.append(queued_command)
+                else:
+                    # AI returned single action format
+                    base_action = structured_command.get("action")
+                    
+                    # Queue up commands for each track
+                    for track_name in tracks_to_process:
+                        queued_command = {
+                            "action": base_action,
+                            "track": track_name
+                        }
+                        
+                        # Copy relevant parameters from original command
+                        if "parameter" in structured_command:
+                            queued_command["parameter"] = structured_command["parameter"]
+                        if "value" in structured_command:
+                            queued_command["value"] = structured_command["value"]
+                        if "effect" in structured_command:
+                            queued_command["effect"] = structured_command["effect"]
+                        
+                        self.command_queue.append(queued_command)
+                
+                # Start processing queue
+                asyncio.create_task(self._process_command_queue())
+                return
+            
+            # Single track or no tracks detected - normal flow
             # Create enhanced context prompt
             context_prompt = self._create_context_prompt(command_text)
             
@@ -444,119 +535,172 @@ Current session tracks:"""
             if "error" in validated_command:
                 print(f"Command validation failed: {validated_command['error']}")
                 return
-            
-            # Check if command was intercepted and should be handled specially
-            if validated_command.get("_intercepted"):
-                print("Command intercepted - handling in voice script...")
-                success = self._execute_single_command(validated_command)
-                if success:
-                    self.successful_commands += 1
-                    asyncio.create_task(self._delayed_state_update())
-            else:
-                # Handle batch commands or single commands normally
-                if validated_command.get("action") == "batch_commands":
-                    success = self._execute_batch_commands(validated_command)
-                else:
-                    success = self._execute_single_command(validated_command)
                 
-                if success:
-                    self.successful_commands += 1
-                    asyncio.create_task(self._delayed_state_update())
+            response = self._send_to_ableton(validated_command)
+            
+            if response.get('status') == 'success':
+                self.successful_commands += 1
+                print("Command executed successfully")
+                result = response.get('result', {})
+                
+                # Enhanced result display
+                self._display_command_result(result, validated_command)
+                
+                # Update session state after successful command
+                asyncio.create_task(self._delayed_state_update())
+                
+            else:
+                print(f"Command failed: {response.get('message', 'Unknown error')}")
                 
         except Exception as e:
             print(f"Error executing updated command: {e}")
         finally:
             self.status = VoiceControlStatus.LISTENING
-            
     
-
-    def _execute_single_command(self, command: Dict[str, Any]) -> bool:
-        """Execute a single command with improved timeout handling"""
-        try:
-            # FIRST: Check if this is an intercepted command - handle it without sending to Ableton
-            if command.get("_intercepted"):
-                track_names = command.get("_track_list", [])
-                print(f"Executing {len(track_names)} individual deletions...")
-                
-                successful = 0
-                failed = 0
-                
-                for track_name in track_names:
-                    print(f"  Deleting track: {track_name}")
-                    # Create a clean single delete command
-                    single_cmd = {"action": "delete_track", "track": track_name}
+    def _extract_tracks_from_command(self, command_text: str) -> List[str]:
+        """Extract track names from command text with fuzzy matching"""
+        command_lower = command_text.lower()
+        
+        print(f"   DEBUG: Extracting tracks from: '{command_text}'")
+        
+        # Get list of existing tracks
+        if not self.current_session_state:
+            print(f"   DEBUG: No session state available")
+            return []
+        
+        tracks = self.current_session_state.get('tracks', [])
+        if not tracks:
+            print(f"   DEBUG: No tracks in session")
+            return []
+        
+        print(f"   DEBUG: Available tracks: {[t['name'] for t in tracks]}")
+        
+        found_tracks = []
+        
+        # Look for track names in the command
+        for track in tracks:
+            track_name_lower = track['name'].lower()
+            
+            # Check if track name is in command
+            if track_name_lower in command_lower:
+                found_tracks.append(track['name'])
+                print(f"   DEBUG: Found track '{track['name']}' in command")
+        
+        print(f"   DEBUG: Initially found {len(found_tracks)} tracks: {found_tracks}")
+        
+        # If we found multiple tracks, return them
+        if len(found_tracks) > 1:
+            print(f"   DEBUG: Returning {len(found_tracks)} tracks")
+            return found_tracks
+        
+        # If only one or no tracks found, check if command contains "and" - do fuzzy matching
+        if " and " in command_lower:
+            print(f"   DEBUG: Found 'and' in command, doing fuzzy matching")
+            words = command_lower.split()
+            
+            for i, word in enumerate(words):
+                if word == "and" and i > 0 and i < len(words) - 1:
+                    before = words[i-1]
+                    after = words[i+1]
                     
-                    try:
-                        response = self._send_to_ableton(single_cmd, timeout=10)
+                    print(f"   DEBUG: Words around 'and': before='{before}', after='{after}'")
+                    
+                    # Fuzzy match these words to tracks
+                    for track in tracks:
+                        track_lower = track['name'].lower()
                         
-                        if response.get('status') == 'success':
-                            print(f"    ✓ Deleted: {track_name}")
-                            successful += 1
-                        else:
-                            error_msg = response.get('message', 'Unknown error')
-                            print(f"    ✗ Failed: {error_msg}")
-                            failed += 1
-                    except Exception as e:
-                        print(f"    ✗ Exception: {str(e)}")
-                        failed += 1
-                    
-                    # Wait between deletions to let Ableton process
-                    time.sleep(0.5)
-                
-                print(f"Batch deletion completed: {successful} successful, {failed} failed")
-                return successful > 0
-            
-            # SECOND: Normal command execution (not intercepted)
-            response = self._send_to_ableton(command, timeout=10)
-            
-            if response.get('status') == 'success':
-                print("Command executed successfully")
-                result = response.get('result', {})
-                self._display_command_result(result, command)
-                return True
-            else:
-                print(f"Command failed: {response.get('message', 'Unknown error')}")
-                return False
-                
-        except Exception as e:
-            print(f"Error executing single command: {e}")
-            return False
-
-    def _execute_batch_commands(self, batch_command: Dict[str, Any]) -> bool:
-        """Execute multiple commands in sequence with error handling"""
-        try:
-            commands = batch_command.get("commands", [])
-            if not commands:
-                print("No commands in batch")
-                return False
-            
-            print(f"Executing batch of {len(commands)} commands...")
-            successful_count = 0
-            
-            for i, command in enumerate(commands):
-                print(f"  Step {i+1}/{len(commands)}: {command.get('action', 'unknown')}")
-                
-                try:
-                    response = self._send_to_ableton(command, timeout=8)
-                    
-                    if response.get('status') == 'success':
-                        result = response.get('result', {})
-                        self._display_command_result(result, command)
-                        successful_count += 1
-                        time.sleep(0.5)
-                    else:
-                        print(f"    Step {i+1} failed: {response.get('message', 'Unknown error')}")
+                        # Calculate similarity for 'before' word
+                        if self._fuzzy_match_word(before, track_lower):
+                            if track['name'] not in found_tracks:
+                                found_tracks.append(track['name'])
+                                print(f"   DEBUG: Fuzzy matched '{before}' to track '{track['name']}'")
                         
-                except Exception as e:
-                    print(f"    Step {i+1} error: {e}")
+                        # Calculate similarity for 'after' word
+                        if self._fuzzy_match_word(after, track_lower):
+                            if track['name'] not in found_tracks:
+                                found_tracks.append(track['name'])
+                                print(f"   DEBUG: Fuzzy matched '{after}' to track '{track['name']}'")
+        
+        print(f"   DEBUG: Final result: {len(found_tracks)} tracks: {found_tracks}")
+        return found_tracks
+    
+    def _fuzzy_match_word(self, word: str, track_name: str) -> bool:
+        """Check if word matches track name with fuzzy logic"""
+        # Exact substring match
+        if word in track_name or track_name in word:
+            return True
+        
+        # Special cases
+        special_matches = {
+            'syncs': 'synth',
+            'base': 'bass',
+            'drum': 'drums',
+            'drums': 'drum',
+            'vocal': 'vocals',
+            'vocals': 'vocal'
+        }
+        
+        if word in special_matches and special_matches[word] in track_name:
+            return True
+        
+        # Calculate character overlap
+        common_chars = sum(1 for a, b in zip(word, track_name) if a == b)
+        similarity = common_chars / max(len(word), len(track_name)) if max(len(word), len(track_name)) > 0 else 0
+        
+        return similarity > 0.6  # 60% similarity threshold
+    
+    async def _process_command_queue(self):
+        """Process queued commands one by one"""
+        if self.queue_processing:
+            return  # Already processing
+        
+        self.queue_processing = True
+        successful = 0
+        failed = 0
+        
+        while self.command_queue:
+            command = self.command_queue.pop(0)
             
-            print(f"Batch completed: {successful_count}/{len(commands)} commands successful")
-            return successful_count > 0
-            
-        except Exception as e:
-            print(f"Error executing batch commands: {e}")
-            return False
-
+            try:
+                validated_command = self._validate_and_enhance_command(command)
+                
+                if "error" in validated_command:
+                    print(f"   Skipping invalid command: {validated_command['error']}")
+                    failed += 1
+                    continue
+                
+                # Get track name for display
+                track_name = validated_command.get("track") or validated_command.get("target", "unknown")
+                print(f"   Executing {validated_command.get('action')} on '{track_name}'...")
+                
+                response = self._send_to_ableton(validated_command)
+                
+                if response.get('status') == 'success':
+                    successful += 1
+                    print(f"      ✓ Success on '{track_name}'")
+                else:
+                    failed += 1
+                    print(f"      ✗ Failed on '{track_name}': {response.get('message', 'Unknown error')}")
+                
+                # Wait between commands (no delay for set_parameter to keep solos together)
+                if validated_command.get("action") != "set_parameter":
+                    await asyncio.sleep(0.15)
+                
+            except Exception as e:
+                print(f"   Error processing queued command: {e}")
+                failed += 1
+        
+        self.queue_processing = False
+        
+        # Summary
+        total = successful + failed
+        print(f"\nQueue complete: {successful}/{total} successful")
+        
+        if successful > 0:
+            self.successful_commands += 1
+        
+        # Update session state
+        await self._delayed_state_update()
 
     def _display_command_result(self, result: Dict[str, Any], command: Dict[str, Any]):
         """Enhanced result display for different command types"""
@@ -602,20 +746,22 @@ Current session tracks:"""
         try:
             action = command.get("action", "")
             
-            # Intercept delete_tracks and handle it in the voice script
-            if action == "delete_tracks":
+            # Universal multi-track action handler
+            if action == "multi_track_action":
                 track_names = command.get("tracks", [])
-                if track_names:
-                    print(f"   Intercepting delete_tracks - will execute {len(track_names)} individual deletions")
-                    # Return a special intercepted command that won't be validated further
+                base_action = command.get("base_action", {})
+                
+                if track_names and base_action:
+                    print(f"   Intercepting multi_track_action - applying {base_action.get('action')} to {len(track_names)} tracks")
                     return {
-                        "action": "intercepted_delete_tracks",  # Changed action name
+                        "action": "intercepted_multi_track",
                         "_intercepted": True,
                         "_track_list": track_names,
-                        "tracks": track_names  # Keep for display
+                        "_base_action": base_action,
+                        "tracks": track_names
                     }
                 else:
-                    return {"error": "No tracks specified for deletion"}
+                    return {"error": "Missing tracks or base_action for multi_track_action"}
             
             # Prevent unwanted track creation when "track" is used as reference
             if action == "create_tracks":
@@ -746,7 +892,7 @@ Current session tracks:"""
                     "prompt": context_prompt, 
                     "stream": False,
                     "options": {
-                        "temperature": 0.01,  # Very low for consistent JSON
+                        "temperature": 0.01,
                         "top_p": 0.5, 
                         "num_predict": 200
                     }
@@ -761,8 +907,6 @@ Current session tracks:"""
             print(f"AI raw response: {ai_response}")
             
             # Enhanced JSON extraction strategies
-            
-            # Strategy 1: Find the most complete JSON object
             json_objects = []
             brace_count = 0
             start_pos = -1
@@ -778,7 +922,7 @@ Current session tracks:"""
                         json_str = ai_response[start_pos:i+1]
                         json_objects.append(json_str)
             
-            # Try parsing each JSON object found (prioritize the last/most complete one)
+            # Try parsing each JSON object found
             for json_str in reversed(json_objects):
                 try:
                     parsed = json.loads(json_str)
@@ -791,7 +935,6 @@ Current session tracks:"""
             # Strategy 2: Clean up common AI response patterns
             cleaned_response = ai_response
             
-            # Remove common prefixes
             prefixes_to_remove = [
                 "Here's the JSON command:",
                 "The command would be:",
@@ -833,11 +976,9 @@ Current session tracks:"""
             sock.settimeout(timeout)
             sock.connect((self.ableton_host, self.ableton_port))
             
-            # Send command
             command_json = json.dumps(action)
             sock.send(command_json.encode('utf-8'))
             
-            # Receive response with timeout
             response_data = sock.recv(4096)
             response = json.loads(response_data.decode('utf-8'))
             
@@ -857,7 +998,7 @@ Current session tracks:"""
         print("UPDATED DEEPGRAM + OLLAMA VOICE CONTROL FOR ABLETON LIVE")
         print("="*70)
         print(f"\nSay '{self.wake_words[0]}' followed by your command")
-        print("Comprehensive parameter support including missing functionalities")
+        print("Universal multi-track action support")
         
         if self.current_session_state:
             tempo = self.current_session_state.get('tempo', 120)
@@ -875,25 +1016,14 @@ Current session tracks:"""
                     arm_flag = " (ARMED)" if track.get('armed') else ""
                     print(f"  - {track['name']}{solo_flag}{mute_flag}{arm_flag}")
         
-        print("\nUPDATED COMMANDS:")
+        print("\nCOMMANDS:")
+        print(f"  '{wake_prefix}mute drums and bass'")
+        print(f"  '{wake_prefix}solo drums, bass, and synth'")
+        print(f"  '{wake_prefix}delete drums and bass'")
+        print(f"  '{wake_prefix}add reverb to vocals and harmony'")
         print(f"  '{wake_prefix}change tempo to 135'")
         print(f"  '{wake_prefix}reduce master volume'")
-        print(f"  '{wake_prefix}put drum bus on drums'")
-        print(f"  '{wake_prefix}add drum buss to drums'")  # Alternative spelling
-        print(f"  '{wake_prefix}record enable bass track'")
-        print(f"  '{wake_prefix}arm the drums'")
-        print(f"  '{wake_prefix}solo drum track'")
-        print(f"  '{wake_prefix}mute bass'")
-        print(f"  '{wake_prefix}add reverb to vocals'")
         print(f"  '{wake_prefix}play' / '{wake_prefix}stop'")
-        
-        print("\nFIXED ISSUES:")
-        print("  ✓ Tempo control (set_tempo action)")
-        print("  ✓ Master volume control (set_master_volume action)")
-        print("  ✓ Track arming (arm_track/disarm_track actions)")
-        print("  ✓ Enhanced device search including 'Drum Bus'")
-        print("  ✓ Better command parsing and validation")
-        print("  ✓ Comprehensive parameter support")
         
         print("\nPress Ctrl+C to stop\n" + "="*70 + "\n")
     
@@ -908,14 +1038,14 @@ Current session tracks:"""
             await self.dg_connection.finish()
         if self.command_count > 0:
             success_rate = (self.successful_commands / self.command_count) * 100
-            print(f"\nUpdated Session Summary:")
+            print(f"\nSession Summary:")
             print(f"   Commands processed: {self.command_count}")
             print(f"   Successful: {self.successful_commands}")
             print(f"   Success rate: {success_rate:.1f}%")
 
 async def main():
     print("Updated Deepgram + Ollama Voice Control for Ableton")
-    print("Fixed tempo, master volume, track arming, and device search\n")
+    print("Universal multi-track action support\n")
     
     deepgram_api_key = None
     ollama_model = "llama3.2:3b"
